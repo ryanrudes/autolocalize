@@ -149,6 +149,7 @@ class InitialLocalizer:
             hit_radius_cells=hit_cells,
             freespace_consistency=False,
             reject_robot_outside_free=False,
+            corner_weight=cfg.search_corner_weight,
         )
         corner_w = cfg.search_corner_weight
         min_ep_for_corners = cfg.min_endpoint_for_corner_rank

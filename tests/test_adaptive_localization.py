@@ -135,21 +135,32 @@ def test_adaptive_tier_distribution_not_all_tier3(maze) -> None:
 
 @pytest.mark.parametrize(
     "pose_index",
-    [313, 576, 708, 777, 794, 891, 985],
+    [
+        313,
+        576,
+        708,
+        777,
+        794,
+        891,
+        985,
+        1139,
+        3326,
+        3405,
+        3415,
+        4542,
+        4937,
+        5004,
+        5941,
+        6649,
+        6956,
+        8203,
+        8860,
+        9744,
+    ],
 )
 def test_adaptive_known_failure_poses_fixed(maze, pose_index: int) -> None:
     """Regression: seed-42 aliases and tier-2 corner-cost mis-picks."""
-    rng = random.Random(42)
-    free = [
-        maze.grid_to_world_center(gx, gy)
-        for gy in range(maze.height)
-        for gx in range(maze.width)
-        if maze.cell_at(gx, gy) == CellState.FREE
-    ]
-    true = [
-        Pose2D(xy[0], xy[1], rng.uniform(-math.pi, math.pi))
-        for xy in (rng.choice(free) for _ in range(1000))
-    ][pose_index]
+    true = _sample_poses(maze, count=max(10000, pose_index + 1), seed=42)[pose_index]
 
     lidar = LidarConfig(num_rays=360, range_min=0.05, range_max=4.0)
     sim = LidarSimulator(maze, lidar)

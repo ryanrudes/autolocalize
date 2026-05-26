@@ -55,6 +55,10 @@ class InitialLocalizerConfig:
     adaptive_tier3_trigger_ep: float = 0.86
     adaptive_position_alias_min_m: float = 0.45
     adaptive_corner_cost_margin_min: float = 0.03
+    adaptive_early_min_corners: float = 0.52
+    adaptive_early_max_corner_cost: float = 0.40
+    adaptive_early_min_ep_with_weak_corners: float = 0.975
+    adaptive_early_min_corners_with_weak_ep: float = 0.35
     # Legacy names kept for compatibility (unused by new adaptive path)
     adaptive_early_exit_score: float | None = None
     adaptive_tier0_min_ep: float = 0.97

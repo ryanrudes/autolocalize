@@ -169,6 +169,27 @@ def _tier2_acceptable(rows: list[CandidateRow], cfg: InitialLocalizerConfig) -> 
     )
 
 
+def _early_exit_corners_ok(
+    scorer: PoseScorer,
+    pose: Pose2D,
+    corner_cost: float,
+    endpoint: float,
+    cfg: InitialLocalizerConfig,
+) -> bool:
+    """Block tier 1/2 early exit on corridor aliases (strong ep, weak corners)."""
+    corners = scorer.score_corners(pose)
+    if corners >= cfg.adaptive_early_min_corners:
+        return True
+    if (
+        endpoint >= cfg.adaptive_early_min_ep_with_weak_corners
+        and corners >= cfg.adaptive_early_min_corners_with_weak_ep
+    ):
+        return True
+    if corner_cost > cfg.adaptive_early_max_corner_cost:
+        return False
+    return False
+
+
 def _tier2_resolved_by_selection(
     rows: list[CandidateRow], cfg: InitialLocalizerConfig
 ) -> bool:
@@ -410,14 +431,17 @@ def localize_adaptive(
     )
     raw_ambiguous = _raw_needs_disambiguation(raw, cfg)
     if tier1 and _tier1_exit_ok(tier1, cfg) and not raw_alias and not raw_ambiguous:
-        best_score, _, _, best_pose = pick_best_candidate(
+        best_score, best_cost, best_ep, best_pose = pick_best_candidate(
             tier1,
             min_match_score=cfg.min_match_score,
             strong_endpoint=cfg.adaptive_strong_ep,
         )
-        return AdaptiveOutcome(
-            best_pose, best_score, hypotheses_tested, stopped_early, 1
-        )
+        if _early_exit_corners_ok(
+            search_scorer, best_pose, best_cost, best_ep, cfg
+        ):
+            return AdaptiveOutcome(
+                best_pose, best_score, hypotheses_tested, stopped_early, 1
+            )
 
     # Tier 2 — disambiguate when quick search is ambiguous or weak
     needs_tier2 = (
@@ -440,14 +464,17 @@ def localize_adaptive(
             _tier2_acceptable(tier2, cfg)
             or _tier2_resolved_by_selection(tier2, cfg)
         ):
-            best_score, _, _, best_pose = pick_best_candidate(
+            best_score, best_cost, best_ep, best_pose = pick_best_candidate(
                 tier2,
                 min_match_score=cfg.min_match_score,
                 strong_endpoint=cfg.adaptive_strong_ep,
             )
-            return AdaptiveOutcome(
-                best_pose, best_score, hypotheses_tested, stopped_early, 2
-            )
+            if _early_exit_corners_ok(
+                search_scorer, best_pose, best_cost, best_ep, cfg
+            ):
+                return AdaptiveOutcome(
+                    best_pose, best_score, hypotheses_tested, stopped_early, 2
+                )
 
     # Tier 3 — full feature search + multiscale (+ grid when still weak)
     greedy_full = greedy_localize(

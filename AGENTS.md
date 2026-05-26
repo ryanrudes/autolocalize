@@ -1,8 +1,8 @@
 ## Learned User Preferences
 
 - Prefer feature-based initial localization over free-space grid search when accuracy allows; precompute map features for reuse.
-- Expect feature-based localization to be fast on typical poses (~70–115 ms median adaptive on maze, machine-dependent); use `config_for_effort("adaptive")` or `scripts/live_benchmark.py --adaptive` for production-quality tiered effort (tiers 1–3, refine-before-accept).
-- When optimizing speed, accelerate `PoseScorer` endpoint/corner scoring and refine inner loops (batched NumPy or optional Numba) before rewriting adaptive/greedy; prefer Numba over C++ bindings unless a hard sub-20 ms median budget requires native code.
+- Expect feature-based localization to be fast on typical poses (~5 ms median adaptive on maze with native build, machine-dependent); use `config_for_effort("adaptive")` or `scripts/live_benchmark.py --adaptive` for production-quality tiered effort (tiers 1–3, refine-before-accept).
+- When optimizing speed, extend or tune the shipped native C++ pose scorer and refine (`cpp/`, `autolocalize._native`) before rewriting adaptive/greedy orchestration; prefer maximum native speed when success rate must stay unchanged.
 - Do not enumerate all combinatorial corner pairings before scoring; evaluate and prune hypotheses greedily.
 - Target close to 100% localization success on maze maps; validate with large simulator batches (e.g. `live_benchmark.py -n 1000 --seed 42 --adaptive`) or pytest slow batches.
 - Use the LIDAR simulator to generate robust automated tests for localization changes.
@@ -21,5 +21,5 @@
 - Connected-freespace checks (`autolocalize/map/freespace.py`) hard-reject impossible poses; hypothesis search ranks without per-ray freespace gating.
 - Tests are pytest-based in `tests/` (`slow`/`stress` markers); `test_adaptive_localization.py` asserts ≥99.5% success and <20% tier-3; seed-42 regression indices 313, 576, 708, 777, 794, 891, 985.
 - `scripts/visualize_localization.py` demos poses (`uv sync --extra viz`); `scripts/live_benchmark.py` Rich benchmark (`-n`, `--adaptive`, `--fast`, `uv sync --dev` for `rich`).
-- Localize CPU time is dominated by repeated `PoseScorer` scoring (`score_fast`, `score_corners`) and refine grid search, not adaptive tier orchestration.
-- CI `test_maze_localization_speed` uses median localize time < 1.2s to tolerate GitHub Actions runner variance.
+- Native pose scoring and refine ship in `autolocalize._native` (C++17 + pybind11, scikit-build-core from `cpp/` on `uv sync`; CMake 3.21+); dominates localize CPU time, not adaptive orchestration.
+- CI installs `cmake` and `ninja-build` before `uv sync`; `test_maze_localization_speed` uses median localize time < 1.2s to tolerate GitHub Actions runner variance.
