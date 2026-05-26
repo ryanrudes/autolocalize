@@ -4,6 +4,8 @@ Fast **initial robot localization** on ROS-style occupancy grids: estimate the L
 
 Designed for maze-like indoor maps where combinatorial feature pairing would be too slow, but geometric consistency still matters.
 
+![Single-scan localization on the sample maze map: simulated LIDAR (left), estimated pose aligned to the map (center), and polar scan (right).](docs/readme-localization.png)
+
 ## Features
 
 - Load standard **YAML + PGM** occupancy grids (`map_server` format)
@@ -68,11 +70,17 @@ if result.success:
 
 ## Visualization
 
-Random poses, simulated scans, and estimated vs. true pose:
+Interactive trials (random poses, simulated scans, estimated vs. true pose):
 
 ```bash
 uv sync --extra viz
 uv run python scripts/visualize_localization.py --count 10 --seed 42
+```
+
+Regenerate the README figure:
+
+```bash
+uv run python scripts/generate_readme_image.py
 ```
 
 ## How it works
