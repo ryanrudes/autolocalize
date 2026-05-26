@@ -44,7 +44,7 @@ def _run_batch(grid, cfg, *, count: int, seed: int) -> dict[str, float | int]:
 
     ok = failed = 0
     times: list[float] = []
-    tiers: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
+    tiers: dict[int, int] = {1: 0, 2: 0, 3: 0}
 
     for true in _sample_poses(grid, count=count, seed=seed):
         scan = sim.scan(true)
@@ -76,7 +76,6 @@ def _run_batch(grid, cfg, *, count: int, seed: int) -> dict[str, float | int]:
         "success_pct": 100.0 * ok / evaluated if evaluated else 0.0,
         "median_ms": sorted_t[len(sorted_t) // 2] * 1000 if sorted_t else 0.0,
         "mean_ms": (sum(times) / len(times) * 1000) if times else 0.0,
-        "tier0": tiers[0],
         "tier1": tiers[1],
         "tier2": tiers[2],
         "tier3": tiers[3],
@@ -98,7 +97,7 @@ def test_adaptive_matches_standard_accuracy(maze) -> None:
     assert adaptive["success_pct"] >= standard["success_pct"] - 1.0, (
         f"adaptive {adaptive['success_pct']:.1f}% vs standard {standard['success_pct']:.1f}%"
     )
-    assert adaptive["success_pct"] >= 98.0
+    assert adaptive["success_pct"] >= 99.5
 
 
 @pytest.mark.slow
@@ -129,6 +128,36 @@ def test_adaptive_tier_distribution_not_all_tier3(maze) -> None:
     """Most poses should exit before the expensive tier."""
     stats = _run_batch(maze, config_for_effort("adaptive"), count=500, seed=99)
     deep = stats["tier3"]
-    total = stats["tier0"] + stats["tier1"] + stats["tier2"] + stats["tier3"]
+    total = stats["tier1"] + stats["tier2"] + stats["tier3"]
     assert total > 0
-    assert deep / total < 0.25, f"too many tier-3 runs: {deep}/{total}"
+    assert deep / total < 0.20, f"too many tier-3 runs: {deep}/{total}"
+
+
+@pytest.mark.parametrize(
+    "pose_index",
+    [313, 576, 708, 777, 794, 891, 985],
+)
+def test_adaptive_known_failure_poses_fixed(maze, pose_index: int) -> None:
+    """Regression: seed-42 aliases and tier-2 corner-cost mis-picks."""
+    rng = random.Random(42)
+    free = [
+        maze.grid_to_world_center(gx, gy)
+        for gy in range(maze.height)
+        for gx in range(maze.width)
+        if maze.cell_at(gx, gy) == CellState.FREE
+    ]
+    true = [
+        Pose2D(xy[0], xy[1], rng.uniform(-math.pi, math.pi))
+        for xy in (rng.choice(free) for _ in range(1000))
+    ][pose_index]
+
+    lidar = LidarConfig(num_rays=360, range_min=0.05, range_max=4.0)
+    sim = LidarSimulator(maze, lidar)
+    loc = InitialLocalizer(maze, config_for_effort("adaptive"))
+
+    scan = sim.scan(true)
+    result = loc.localize(scan, lidar_config=lidar)
+    assert result.success and result.pose is not None
+    trans_err, rot_err = pose_error(result.pose, true)
+    assert trans_err < 0.3, f"idx {pose_index}: trans={trans_err:.3f}"
+    assert rot_err < 0.4, f"idx {pose_index}: rot={rot_err:.3f}"
