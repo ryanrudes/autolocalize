@@ -83,6 +83,13 @@ Regenerate the README figure:
 uv run python scripts/generate_readme_image.py
 ```
 
+Live benchmark (progress bar, success/failure rates):
+
+```bash
+uv sync --dev
+uv run python scripts/live_benchmark.py -n 100 --adaptive
+```
+
 ## How it works
 
 ```mermaid
