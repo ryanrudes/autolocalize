@@ -48,6 +48,13 @@ def refine_pose_multiscale(
     rotation_span: float = 0.35,
 ) -> tuple[Pose2D, float]:
     """Coarse-to-fine grid search for larger initial pose error."""
+    native = scorer._native
+    if native is not None:
+        x, y, theta, score = native.refine_multiscale(
+            pose.x, pose.y, pose.theta, translation_span, rotation_span
+        )
+        return Pose2D(x, y, theta), score
+
     best_pose, best_score = pose, scorer.score_fast(pose)
     scales = (
         (max(translation_span, 0.35), 0.12, max(rotation_span, 0.45), 0.12),
@@ -77,6 +84,19 @@ def _search_grid(
     rotation_step: float,
     rotation_span: float,
 ) -> tuple[Pose2D, float]:
+    native = scorer._native
+    if native is not None:
+        x, y, theta, score = native.refine_grid(
+            pose.x,
+            pose.y,
+            pose.theta,
+            translation_step,
+            translation_span,
+            rotation_step,
+            rotation_span,
+        )
+        return Pose2D(x, y, theta), score
+
     best_pose = pose
     best_score = scorer.score_fast(pose)
 

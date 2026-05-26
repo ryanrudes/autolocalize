@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -8,6 +9,16 @@ from autolocalize.features.corners import CornerFeature
 from autolocalize.geometry.pose import Pose2D
 from autolocalize.map.freespace import FreeSpaceIndex, binary_dilate
 from autolocalize.map.grid import CellState, OccupancyGrid
+
+try:
+    from autolocalize._native import PoseScorerNative
+except ImportError:  # pragma: no cover - editable installs always build native
+    PoseScorerNative = None  # type: ignore[misc, assignment]
+
+if TYPE_CHECKING:
+    from autolocalize._native import PoseScorerNative as PoseScorerNativeType
+else:
+    PoseScorerNativeType = Any
 
 
 class FastOccupancyLookup:
@@ -56,6 +67,63 @@ def world_to_grid(
     return gx, gy
 
 
+def _xy2_array(corners: tuple[CornerFeature, ...]) -> np.ndarray:
+    if not corners:
+        return np.empty((0, 2), dtype=np.float64)
+    return np.asarray([(c.x, c.y) for c in corners], dtype=np.float64)
+
+
+def _angles_array(corners: tuple[CornerFeature, ...]) -> np.ndarray:
+    if not corners:
+        return np.empty(0, dtype=np.float64)
+    return np.asarray([c.angle for c in corners], dtype=np.float64)
+
+
+def _build_native_scorer(
+    lookup: FastOccupancyLookup,
+    local_xy: np.ndarray,
+    scan_corners: tuple[CornerFeature, ...],
+    map_corners: tuple[CornerFeature, ...],
+    *,
+    hit_mask: np.ndarray,
+    position_tolerance: float,
+    angle_tolerance: float,
+    corner_match_requires_angle: bool,
+    freespace_consistency: bool,
+    reject_robot_outside_free: bool,
+) -> PoseScorerNativeType | None:
+    if PoseScorerNative is None:
+        return None
+
+    component_labels = None
+    reachable_masks: list[np.ndarray] = []
+    if freespace_consistency:
+        component_labels = lookup.freespace.component_labels
+        reachable_masks = [
+            lookup.freespace.reachable_region(component_id)
+            for component_id in range(lookup.freespace.num_components)
+        ]
+
+    return PoseScorerNative(
+        hit_mask,
+        np.ascontiguousarray(local_xy, dtype=np.float64),
+        _xy2_array(scan_corners),
+        _angles_array(scan_corners),
+        _xy2_array(map_corners),
+        _angles_array(map_corners),
+        lookup.origin_x,
+        lookup.origin_y,
+        lookup.resolution,
+        position_tolerance * position_tolerance,
+        angle_tolerance,
+        corner_match_requires_angle,
+        freespace_consistency,
+        reject_robot_outside_free,
+        component_labels,
+        reachable_masks,
+    )
+
+
 class PoseScorer:
     """
     Cached scan data for fast repeated pose scoring during localization.
@@ -102,9 +170,53 @@ class PoseScorer:
             [c.angle for c in map_corners], dtype=np.float64
         )
         self._pos_tol_sq = position_tolerance * position_tolerance
+        self._native = _build_native_scorer(
+            lookup,
+            local_xy,
+            scan_corners,
+            map_corners,
+            hit_mask=self._hit_mask,
+            position_tolerance=position_tolerance,
+            angle_tolerance=angle_tolerance,
+            corner_match_requires_angle=corner_match_requires_angle,
+            freespace_consistency=freespace_consistency,
+            reject_robot_outside_free=reject_robot_outside_free,
+        )
+
+    @property
+    def uses_native(self) -> bool:
+        return self._native is not None
 
     def score_fast(self, pose: Pose2D) -> float:
+        if self._native is not None:
+            return float(
+                self._native.score_fast(pose.x, pose.y, pose.theta)
+            )
         return self._score_endpoints(pose)
+
+    def rank_pose(
+        self,
+        pose: Pose2D,
+        *,
+        corner_weight: float,
+        min_ep_for_corners: float,
+    ) -> float:
+        if self._native is not None:
+            return float(
+                self._native.rank_pose(
+                    pose.x,
+                    pose.y,
+                    pose.theta,
+                    corner_weight,
+                    min_ep_for_corners,
+                )
+            )
+        endpoint = self.score_fast(pose)
+        if endpoint < min_ep_for_corners:
+            return endpoint
+        if corner_weight > 0.0 and self._scan_xy.shape[0] > 0:
+            return endpoint + corner_weight * self.score_corners(pose)
+        return endpoint
 
     def _endpoint_plausible(
         self, gx: np.ndarray, gy: np.ndarray, reachable: np.ndarray
@@ -162,6 +274,10 @@ class PoseScorer:
         return hits / n
 
     def score_corners(self, pose: Pose2D) -> float:
+        if self._native is not None:
+            return float(
+                self._native.score_corners(pose.x, pose.y, pose.theta)
+            )
         n_scan = self._scan_xy.shape[0]
         if n_scan == 0 or self._map_xy.shape[0] == 0:
             return 0.0
@@ -193,6 +309,10 @@ class PoseScorer:
 
         Penalizes permutations that swap walls compared to independent nearest-neighbor matching.
         """
+        if self._native is not None:
+            return float(
+                self._native.corner_assignment_cost(pose.x, pose.y, pose.theta)
+            )
         n_scan = self._scan_xy.shape[0]
         n_map = self._map_xy.shape[0]
         if n_scan == 0 or n_map == 0:
@@ -222,6 +342,10 @@ class PoseScorer:
 
     def freespace_violation_rate(self, pose: Pose2D) -> float:
         """Fraction of endpoints outside the noise-expanded free region (and not on walls)."""
+        if self._native is not None:
+            return float(
+                self._native.freespace_violation_rate(pose.x, pose.y, pose.theta)
+            )
         n = self.local_xy.shape[0]
         if n == 0:
             return 1.0

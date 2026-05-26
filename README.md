@@ -12,7 +12,7 @@ Designed for maze-like indoor maps where combinatorial feature pairing would be 
 - **2D LIDAR simulator** (ray cast against the grid)
 - **Corner features** from map boundaries and scan endpoints
 - **Greedy hypothesis search** with top-K refinement (not full combinatorial enumeration)
-- **Connected free-space checks** so impossible poses are rejected
+- **Native C++ core** (pybind11) for pose scoring and refine grid search
 - **~100% pose recovery** on 1000 random free-space poses in the bundled maze map (see tests)
 - Optional **matplotlib** visualization script
 
@@ -20,6 +20,7 @@ Designed for maze-like indoor maps where combinatorial feature pairing would be 
 
 - Python **3.12+**
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- **CMake 3.21+** and a **C++17 compiler** (builds the native scoring extension automatically)
 
 ## Install
 
@@ -107,7 +108,7 @@ flowchart LR
 1. **Precompute** salient wall corners on the map (once per map).
 2. **Extract** corners from the scan (sharp range discontinuities).
 3. **Generate poses** from corner correspondences (singles and length-matched pairs).
-4. **Score** hypotheses by occupancy hit rate (fast numpy raster lookup).
+4. **Score** hypotheses by occupancy hit rate (native C++ raster lookup).
 5. **Refine** the top candidates with a coarse-to-fine local search.
 6. **Fall back** to a coarse position/heading grid when endpoint match stays weak.
 
@@ -131,7 +132,7 @@ from autolocalize.localization.config import config_for_effort
 localizer = InitialLocalizer(grid, config_for_effort("adaptive"))
 ```
 
-`LocalizationResult.effort_tier` reports which tier finished (`0` = quickest, `3` = full recovery). On 1000 maze poses (seed 42), adaptive is typically **~99%+ success** with **~30 ms median** vs **~370 ms** for standard.
+`LocalizationResult.effort_tier` reports which tier finished (`0` = quickest, `3` = full recovery). On 1000 maze poses (seed 42), adaptive is typically **~99%+ success** with **~5 ms median** (native C++ core) vs **~370 ms** for standard.
 
 ## Maps
 
@@ -157,6 +158,7 @@ uv run pytest tests/ -m stress   # 1000 random poses, ≥99% success
 | Path | Purpose |
 |------|---------|
 | `autolocalize/` | Library: map, sensors, features, localization |
+| `cpp/` | Native C++ pose scorer + pybind11 bindings (`autolocalize._native`) |
 | `maps/` | Sample occupancy grid |
 | `tests/` | Pytest suite + LIDAR simulator regression |
 | `scripts/visualize_localization.py` | Debug / demo plots |

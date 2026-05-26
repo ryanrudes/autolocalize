@@ -154,12 +154,11 @@ class InitialLocalizer:
         min_ep_for_corners = cfg.min_endpoint_for_corner_rank
 
         def rank_pose(pose: Pose2D) -> float:
-            endpoint = search_scorer.score_fast(pose)
-            if endpoint < min_ep_for_corners:
-                return endpoint
-            if corner_w > 0.0 and scan_corners:
-                return endpoint + corner_w * search_scorer.score_corners(pose)
-            return endpoint
+            return search_scorer.rank_pose(
+                pose,
+                corner_weight=corner_w,
+                min_ep_for_corners=min_ep_for_corners,
+            )
 
         if cfg.effort == "adaptive":
             outcome = localize_adaptive(
