@@ -7,24 +7,30 @@ from typing import TYPE_CHECKING, Callable
 
 from autolocalize.features.corners import CornerFeature
 from autolocalize.geometry.pose import Pose2D
+from autolocalize.localization.config import InitialLocalizerConfig
 from autolocalize.localization.fast_grid import PoseScorer
 from autolocalize.localization.greedy import greedy_localize
 from autolocalize.localization.hypotheses import generate_grid_hypotheses
-from autolocalize.localization.config import InitialLocalizerConfig
+from autolocalize.localization.refine import (
+    refine_pose,
+    refine_pose_multiscale,
+    refine_pose_quick,
+)
 from autolocalize.localization.selection import pick_best_candidate
-from autolocalize.localization.refine import refine_pose, refine_pose_multiscale
 
 if TYPE_CHECKING:
     from autolocalize.map.grid import OccupancyGrid
 
+CandidateRow = tuple[float, float, float, Pose2D]
+
 
 @dataclass(frozen=True, slots=True)
 class AdaptiveOutcome:
-  pose: Pose2D | None
-  score: float
-  hypotheses_tested: int
-  stopped_early: bool
-  effort_tier: int
+    pose: Pose2D | None
+    score: float
+    hypotheses_tested: int
+    stopped_early: bool
+    effort_tier: int
 
 
 def _candidate_tuple(
@@ -32,7 +38,7 @@ def _candidate_tuple(
     pose: Pose2D,
     *,
     refine: Callable[[Pose2D], Pose2D] | None = None,
-) -> tuple[float, float, float, Pose2D] | None:
+) -> CandidateRow | None:
     if refine is not None:
         pose = refine(pose)
     search_ep = scorer.score_fast(pose)
@@ -46,8 +52,8 @@ def _candidate_tuple(
 
 def _rank_raw(
     scorer: PoseScorer, candidates: list[tuple[float, Pose2D]]
-) -> list[tuple[float, float, float, Pose2D]]:
-    ranked: list[tuple[float, float, float, Pose2D]] = []
+) -> list[CandidateRow]:
+    ranked: list[CandidateRow] = []
     for _, pose in candidates:
         row = _candidate_tuple(scorer, pose)
         if row is not None:
@@ -56,33 +62,145 @@ def _rank_raw(
     return ranked
 
 
-def _score_margin(ranked: list[tuple[float, float, float, Pose2D]]) -> float:
-    if len(ranked) < 2:
+def _score_margin(rows: list[CandidateRow]) -> float:
+    if len(rows) < 2:
         return float("inf")
-    return ranked[0][0] - ranked[1][0]
+    return rows[0][0] - rows[1][0]
 
 
-def _count_strong(
-    ranked: list[tuple[float, float, float, Pose2D]], *, threshold: float
-) -> int:
-    return sum(1 for row in ranked if row[2] >= threshold)
+def _endpoint_margin(rows: list[CandidateRow]) -> float:
+    if len(rows) < 2:
+        return float("inf")
+    return rows[0][2] - rows[1][2]
 
 
-def _is_confident(
-    ranked: list[tuple[float, float, float, Pose2D]],
+def _pose_distance(a: Pose2D, b: Pose2D) -> float:
+    return math.hypot(a.x - b.x, a.y - b.y)
+
+
+def _position_spread(poses: list[Pose2D]) -> float:
+    if len(poses) < 2:
+        return 0.0
+    max_d = 0.0
+    for i, p1 in enumerate(poses):
+        for p2 in poses[i + 1 :]:
+            max_d = max(max_d, _pose_distance(p1, p2))
+    return max_d
+
+
+def _strong_rows(rows: list[CandidateRow], *, threshold: float) -> list[CandidateRow]:
+    return [row for row in rows if row[2] >= threshold]
+
+
+def _has_position_alias(
+    rows: list[CandidateRow],
+    *,
+    strong_ep: float,
+    min_separation_m: float,
+) -> bool:
+    """True when multiple high-scoring hypotheses disagree by translation."""
+    strong = _strong_rows(rows, threshold=strong_ep)
+    if len(strong) < 2:
+        return False
+    return _position_spread([row[3] for row in strong]) >= min_separation_m
+
+
+def _corner_cost_margin(rows: list[CandidateRow]) -> float:
+    if len(rows) < 2:
+        return float("inf")
+    ordered = sorted(rows, key=lambda item: item[1])
+    return ordered[1][1] - ordered[0][1]
+
+
+def _has_clear_winner(
+    rows: list[CandidateRow],
+    cfg: InitialLocalizerConfig,
     *,
     min_ep: float,
-    min_margin: float,
-    strong_ep: float,
+    min_endpoint_gap: float,
 ) -> bool:
-    if not ranked:
+    """Single dominant hypothesis after refine (endpoint-led)."""
+    if not rows:
         return False
-    best_ep = ranked[0][2]
-    if best_ep < min_ep:
+    if rows[0][2] < min_ep:
         return False
-    if _score_margin(ranked) < min_margin:
+    if _has_position_alias(
+        rows,
+        strong_ep=cfg.adaptive_strong_ep,
+        min_separation_m=cfg.adaptive_position_alias_min_m,
+    ):
         return False
-    return _count_strong(ranked, threshold=strong_ep) <= 1
+    if len(rows) >= 2 and _endpoint_margin(rows) < min_endpoint_gap:
+        return False
+    return True
+
+
+def _is_confident_after_refine(
+    rows: list[CandidateRow],
+    cfg: InitialLocalizerConfig,
+) -> bool:
+    """Strong match with geometric agreement among refined poses."""
+    if not _has_clear_winner(
+        rows,
+        cfg,
+        min_ep=cfg.adaptive_confident_min_ep,
+        min_endpoint_gap=cfg.adaptive_confident_endpoint_margin,
+    ):
+        return False
+    if len(rows) >= 2 and _score_margin(rows) < cfg.adaptive_confident_margin:
+        return False
+    strong = _strong_rows(rows, threshold=cfg.adaptive_strong_ep)
+    if len(strong) >= 2 and _corner_cost_margin(strong) < cfg.adaptive_corner_cost_margin_min:
+        return False
+    return True
+
+
+def _tier2_acceptable(rows: list[CandidateRow], cfg: InitialLocalizerConfig) -> bool:
+    if not rows:
+        return False
+    best_score, _, best_ep, _ = rows[0]
+    if best_score < cfg.min_match_score:
+        return False
+    return _has_clear_winner(
+        rows,
+        cfg,
+        min_ep=cfg.adaptive_tier2_accept_ep,
+        min_endpoint_gap=cfg.adaptive_confident_endpoint_margin,
+    )
+
+
+def _tier2_resolved_by_selection(
+    rows: list[CandidateRow], cfg: InitialLocalizerConfig
+) -> bool:
+    """
+    Accept tier 2 when endpoint-led pick is strong and top-scoring poses agree.
+
+    Accuracy comes from pick_best_candidate's endpoint tie-band; we only escalate
+    when multiple poses in that band still disagree by translation.
+    """
+    if not rows:
+        return False
+    _, _, best_ep, _ = pick_best_candidate(
+        rows,
+        min_match_score=cfg.min_match_score,
+        strong_endpoint=cfg.adaptive_strong_ep,
+        endpoint_tie_band=cfg.adaptive_confident_endpoint_margin,
+    )
+    if best_ep < cfg.adaptive_tier2_accept_ep:
+        return False
+    max_ep = max(row[2] for row in rows)
+    if best_ep < max_ep - cfg.adaptive_confident_endpoint_margin:
+        return False
+    leaders = [
+        row
+        for row in rows
+        if row[2] >= max_ep - cfg.adaptive_confident_endpoint_margin
+    ]
+    if len(leaders) >= 2 and _position_spread([row[3] for row in leaders]) >= (
+        cfg.adaptive_position_alias_min_m
+    ):
+        return False
+    return True
 
 
 def _refine_single(
@@ -91,6 +209,7 @@ def _refine_single(
     cfg: InitialLocalizerConfig,
     *,
     multiscale: bool,
+    quick: bool,
 ) -> Pose2D:
     if multiscale:
         pose, _ = refine_pose_multiscale(
@@ -99,6 +218,8 @@ def _refine_single(
             translation_span=cfg.translation_span,
             rotation_span=cfg.rotation_span,
         )
+    elif quick:
+        pose, _ = refine_pose_quick(scorer, pose)
     else:
         pose, _ = refine_pose(
             scorer,
@@ -109,24 +230,86 @@ def _refine_single(
     return pose
 
 
-def _refine_candidates(
+def _refine_ranked(
     scorer: PoseScorer,
-    candidates: list[tuple[float, Pose2D]],
+    ranked: list[CandidateRow],
     cfg: InitialLocalizerConfig,
     *,
     limit: int,
     multiscale: bool,
-) -> list[tuple[float, float, float, Pose2D]]:
-    refined: list[tuple[float, float, float, Pose2D]] = []
+    quick: bool = False,
+) -> list[CandidateRow]:
+    refined: list[CandidateRow] = []
 
     def do_refine(p: Pose2D) -> Pose2D:
-        return _refine_single(scorer, p, cfg, multiscale=multiscale)
+        return _refine_single(scorer, p, cfg, multiscale=multiscale, quick=quick)
 
-    for _, pose in candidates[:limit]:
+    for _, _, _, pose in ranked[:limit]:
         row = _candidate_tuple(scorer, pose, refine=do_refine)
         if row is not None:
             refined.append(row)
+    refined.sort(key=lambda item: (-item[0], item[1]))
     return refined
+
+
+def _tier1_exit_ok(rows: list[CandidateRow], cfg: InitialLocalizerConfig) -> bool:
+    return _has_clear_winner(
+        rows,
+        cfg,
+        min_ep=cfg.adaptive_quick_win_ep,
+        min_endpoint_gap=cfg.adaptive_quick_win_endpoint_gap,
+    ) or _is_confident_after_refine(rows, cfg)
+
+
+def _raw_needs_disambiguation(
+    raw: list[CandidateRow], cfg: InitialLocalizerConfig
+) -> bool:
+    """True when the quick greedy heap still has competing hypotheses."""
+    top = raw[: cfg.adaptive_tier2_refine_k]
+    if not top:
+        return False
+    if _has_position_alias(
+        top,
+        strong_ep=cfg.adaptive_strong_ep,
+        min_separation_m=cfg.adaptive_position_alias_min_m,
+    ):
+        return True
+    if len(top) >= 2 and _endpoint_margin(top) < cfg.adaptive_confident_endpoint_margin:
+        return True
+    close = [row for row in top if row[2] >= cfg.adaptive_tier3_trigger_ep]
+    return len(close) >= 2 and _position_spread([row[3] for row in close]) >= (
+        cfg.adaptive_position_alias_min_m * 0.5
+    )
+
+
+def _refine_tier1_cascade(
+    scorer: PoseScorer,
+    raw: list[CandidateRow],
+    cfg: InitialLocalizerConfig,
+) -> list[CandidateRow]:
+    """Refine top-1 first; expand only when quick exit is not safe."""
+    if not raw:
+        return []
+
+    limit = cfg.adaptive_tier1_refine_k
+    refined = _refine_ranked(
+        scorer, raw[:1], cfg, limit=1, multiscale=False, quick=True
+    )
+    if not refined:
+        return []
+
+    if _tier1_exit_ok(refined, cfg) and not _raw_needs_disambiguation(raw, cfg):
+        return refined
+
+    if len(raw) < 2 or limit <= 1:
+        return refined
+
+    if not _raw_needs_disambiguation(raw, cfg) and refined[0][2] >= cfg.adaptive_tier2_accept_ep:
+        return refined
+
+    return _refine_ranked(
+        scorer, raw, cfg, limit=limit, multiscale=False, quick=True
+    )
 
 
 def _run_grid_recovery(
@@ -136,8 +319,8 @@ def _run_grid_recovery(
     cfg: InitialLocalizerConfig,
     *,
     hypotheses_tested: int,
-    refined_candidates: list[tuple[float, float, float, Pose2D]],
-) -> tuple[list[tuple[float, float, float, Pose2D]], int]:
+    refined_candidates: list[CandidateRow],
+) -> tuple[list[CandidateRow], int]:
     grid_heap: list[tuple[float, int, Pose2D]] = []
     tie = 0
     keep_grid = max(3, cfg.adaptive_tier3_top_k // 2)
@@ -157,18 +340,20 @@ def _run_grid_recovery(
         elif fast > grid_heap[0][0]:
             heapq.heapreplace(grid_heap, entry)
 
-    grid_candidates = [
-        (score, pose) for score, _, pose in sorted(grid_heap, key=lambda e: e[0], reverse=True)
+    grid_poses = [
+        pose for _, _, pose in sorted(grid_heap, key=lambda item: item[0], reverse=True)
     ]
+    grid_ranked = _rank_raw(scorer, [(0.0, p) for p in grid_poses])
     refined_candidates.extend(
-        _refine_candidates(
+        _refine_ranked(
             scorer,
-            grid_candidates,
+            grid_ranked,
             cfg,
             limit=cfg.adaptive_tier3_top_k,
             multiscale=True,
         )
     )
+    refined_candidates.sort(key=lambda item: (-item[0], item[1]))
     return refined_candidates, hypotheses_tested
 
 
@@ -181,12 +366,11 @@ def localize_adaptive(
     rank_pose: Callable[[Pose2D], float],
 ) -> AdaptiveOutcome:
     """
-    Tiered localization: cheap greedy + scoring first, deepen only when uncertain.
+    Tiered localization with refine-before-accept and geometric ambiguity checks.
 
-    Tier 0 — quick greedy, raw scores only
-    Tier 1 — single-scale refine on top-1
-    Tier 2 — refine top-K + disambiguation
-    Tier 3 — full greedy + multiscale refine (+ grid if still weak)
+    Tier 1 — quick greedy (limited corners), refine top-ranked raw hypotheses
+    Tier 2 — refine more ranked candidates + corner-cost disambiguation
+    Tier 3 — full greedy, multiscale refine, optional grid recovery
     """
     hypotheses_tested = 0
     stopped_early = False
@@ -196,78 +380,76 @@ def localize_adaptive(
         map_corners,
         rank_pose,
         min_score=cfg.min_match_score,
-        early_exit_score=cfg.adaptive_early_exit_score,
+        early_exit_score=None,
         try_heading_flip=cfg.try_heading_flip,
         max_scan_corners_for_pairs=cfg.adaptive_quick_pairs,
         max_scan_corners_for_singles=cfg.adaptive_quick_singles,
+        max_map_corners_for_singles=cfg.adaptive_quick_map_singles,
         top_k=cfg.adaptive_quick_top_k,
         grid_resolution=grid.resolution,
     )
     hypotheses_tested += greedy_quick.hypotheses_tried
     stopped_early = greedy_quick.stopped_early
-    candidates = list(greedy_quick.top_candidates)
-    if not candidates and greedy_quick.pose is not None:
-        candidates = [(greedy_quick.score, greedy_quick.pose)]
+    heap_candidates = list(greedy_quick.top_candidates)
+    if not heap_candidates and greedy_quick.pose is not None:
+        heap_candidates = [(greedy_quick.score, greedy_quick.pose)]
 
-    if not candidates:
-        return AdaptiveOutcome(None, 0.0, hypotheses_tested, stopped_early, 0)
+    if not heap_candidates:
+        return AdaptiveOutcome(None, 0.0, hypotheses_tested, stopped_early, 3)
 
-    raw = _rank_raw(search_scorer, candidates)
+    raw = _rank_raw(search_scorer, heap_candidates)
+    if not raw:
+        return AdaptiveOutcome(None, 0.0, hypotheses_tested, stopped_early, 3)
 
-    # Tier 0: very confident without any refine
-    if _is_confident(
-        raw,
-        min_ep=cfg.adaptive_tier0_min_ep,
-        min_margin=cfg.adaptive_confident_margin,
+    # Tier 1 — cascade refine ranked hypotheses (never accept unrefined poses)
+    tier1 = _refine_tier1_cascade(search_scorer, raw, cfg)
+    raw_alias = _has_position_alias(
+        raw[: cfg.adaptive_tier2_refine_k],
         strong_ep=cfg.adaptive_strong_ep,
-    ):
-        best_score, _, _, best_pose = raw[0]
-        if best_score >= cfg.min_match_score:
-            return AdaptiveOutcome(
-                best_pose, best_score, hypotheses_tested, stopped_early, 0
-            )
-
-    # Tier 1: one quick refine on the best raw candidate
-    tier1 = _refine_candidates(
-        search_scorer, candidates, cfg, limit=1, multiscale=False
+        min_separation_m=cfg.adaptive_position_alias_min_m,
     )
-    if tier1 and _is_confident(
-        tier1,
-        min_ep=cfg.adaptive_tier1_min_ep,
-        min_margin=cfg.adaptive_confident_margin,
-        strong_ep=cfg.adaptive_strong_ep,
-    ):
-        best_score, _, best_search_ep, best_pose = tier1[0]
-        if best_score >= cfg.min_match_score:
-            return AdaptiveOutcome(
-                best_pose, best_score, hypotheses_tested, stopped_early, 1
-            )
-
-    ambiguous = _count_strong(raw, threshold=cfg.adaptive_strong_ep) >= 2
-
-    # Tier 2: refine a few candidates and pick with corner-cost tie-break
-    if ambiguous or (tier1 and tier1[0][2] < cfg.adaptive_tier2_min_ep):
-        tier2 = _refine_candidates(
-            search_scorer,
-            candidates,
-            cfg,
-            limit=cfg.adaptive_tier2_top_k,
-            multiscale=False,
+    raw_ambiguous = _raw_needs_disambiguation(raw, cfg)
+    if tier1 and _tier1_exit_ok(tier1, cfg) and not raw_alias and not raw_ambiguous:
+        best_score, _, _, best_pose = pick_best_candidate(
+            tier1,
+            min_match_score=cfg.min_match_score,
+            strong_endpoint=cfg.adaptive_strong_ep,
         )
-        if tier2:
-            best_score, _, best_search_ep, best_pose = pick_best_candidate(
-                tier2, min_match_score=cfg.min_match_score
-            )
-            if (
-                best_pose is not None
-                and best_score >= cfg.min_match_score
-                and best_search_ep >= cfg.adaptive_tier2_accept_ep
-            ):
-                return AdaptiveOutcome(
-                    best_pose, best_score, hypotheses_tested, stopped_early, 2
-                )
+        return AdaptiveOutcome(
+            best_pose, best_score, hypotheses_tested, stopped_early, 1
+        )
 
-    # Tier 3: full search + multiscale (+ optional grid)
+    # Tier 2 — disambiguate when quick search is ambiguous or weak
+    needs_tier2 = (
+        raw_alias
+        or raw_ambiguous
+        or (tier1 and tier1[0][2] < cfg.adaptive_tier2_accept_ep)
+    )
+
+    tier2: list[CandidateRow] = []
+    if needs_tier2:
+        tier2 = _refine_ranked(
+            search_scorer,
+            raw,
+            cfg,
+            limit=cfg.adaptive_tier2_refine_k,
+            multiscale=False,
+            quick=True,
+        )
+        if tier2 and (
+            _tier2_acceptable(tier2, cfg)
+            or _tier2_resolved_by_selection(tier2, cfg)
+        ):
+            best_score, _, _, best_pose = pick_best_candidate(
+                tier2,
+                min_match_score=cfg.min_match_score,
+                strong_endpoint=cfg.adaptive_strong_ep,
+            )
+            return AdaptiveOutcome(
+                best_pose, best_score, hypotheses_tested, stopped_early, 2
+            )
+
+    # Tier 3 — full feature search + multiscale (+ grid when still weak)
     greedy_full = greedy_localize(
         scan_corners,
         map_corners,
@@ -281,13 +463,14 @@ def localize_adaptive(
         grid_resolution=grid.resolution,
     )
     hypotheses_tested += greedy_full.hypotheses_tried
-    full_candidates = list(greedy_full.top_candidates)
-    if not full_candidates and greedy_full.pose is not None:
-        full_candidates = [(greedy_full.score, greedy_full.pose)]
+    full_heap = list(greedy_full.top_candidates)
+    if not full_heap and greedy_full.pose is not None:
+        full_heap = [(greedy_full.score, greedy_full.pose)]
 
-    refined = _refine_candidates(
+    full_raw = _rank_raw(search_scorer, full_heap)
+    refined = _refine_ranked(
         search_scorer,
-        full_candidates,
+        full_raw,
         cfg,
         limit=cfg.adaptive_tier3_top_k,
         multiscale=True,
@@ -298,13 +481,20 @@ def localize_adaptive(
     best_search_ep = 0.0
     if refined:
         best_score, _, best_search_ep, best_pose = pick_best_candidate(
-            refined, min_match_score=cfg.min_match_score
+            refined,
+            min_match_score=cfg.min_match_score,
+            strong_endpoint=cfg.adaptive_strong_ep,
         )
 
     needs_grid = cfg.grid_search_on_failure and (
         best_pose is None
         or best_score < cfg.min_match_score
         or best_search_ep < cfg.grid_search_endpoint_threshold
+        or _has_position_alias(
+            refined,
+            strong_ep=cfg.adaptive_strong_ep,
+            min_separation_m=cfg.adaptive_position_alias_min_m * 0.75,
+        )
     )
     if needs_grid:
         refined, hypotheses_tested = _run_grid_recovery(
@@ -317,7 +507,9 @@ def localize_adaptive(
         )
         if refined:
             best_score, _, best_search_ep, best_pose = pick_best_candidate(
-                refined, min_match_score=cfg.min_match_score
+                refined,
+                min_match_score=cfg.min_match_score,
+                strong_endpoint=cfg.adaptive_strong_ep,
             )
 
     if best_pose is None or best_score < cfg.min_match_score:

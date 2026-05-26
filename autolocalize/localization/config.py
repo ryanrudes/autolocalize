@@ -36,19 +36,31 @@ class InitialLocalizerConfig:
     min_endpoint_for_corner_rank: float = 0.25
     refine_multiscale: bool = True
     effort: Literal["standard", "fast", "adaptive"] = "standard"
+    # Adaptive effort (refine-before-accept; no unrefined early exit)
     adaptive_quick_stride: int = 8
     adaptive_quick_pairs: int = 6
-    adaptive_quick_singles: int = 8
-    adaptive_quick_top_k: int = 6
-    adaptive_early_exit_score: float | None = 0.98
+    adaptive_quick_singles: int = 6
+    adaptive_quick_map_singles: int = 28
+    adaptive_quick_top_k: int = 8
+    adaptive_tier1_refine_k: int = 3
+    adaptive_tier2_refine_k: int = 5
+    adaptive_tier3_top_k: int = 8
+    adaptive_quick_win_ep: float = 0.97
+    adaptive_quick_win_endpoint_gap: float = 0.035
+    adaptive_confident_min_ep: float = 0.93
+    adaptive_confident_margin: float = 0.04
+    adaptive_confident_endpoint_margin: float = 0.025
+    adaptive_strong_ep: float = 0.88
+    adaptive_tier2_accept_ep: float = 0.91
+    adaptive_tier3_trigger_ep: float = 0.86
+    adaptive_position_alias_min_m: float = 0.45
+    adaptive_corner_cost_margin_min: float = 0.03
+    # Legacy names kept for compatibility (unused by new adaptive path)
+    adaptive_early_exit_score: float | None = None
     adaptive_tier0_min_ep: float = 0.97
     adaptive_tier1_min_ep: float = 0.95
     adaptive_tier2_min_ep: float = 0.88
-    adaptive_tier2_accept_ep: float = 0.90
     adaptive_tier2_top_k: int = 3
-    adaptive_tier3_top_k: int = 8
-    adaptive_confident_margin: float = 0.06
-    adaptive_strong_ep: float = 0.92
 
 
 def config_for_effort(effort: Literal["standard", "fast", "adaptive"]) -> InitialLocalizerConfig:

@@ -22,6 +22,24 @@ def refine_pose(
     )
 
 
+def refine_pose_quick(
+    scorer: PoseScorer,
+    pose: Pose2D,
+    *,
+    translation_span: float = 0.16,
+    rotation_span: float = 0.28,
+) -> tuple[Pose2D, float]:
+    """Coarser, smaller local search for adaptive tier 1/2 (fewer evaluations)."""
+    return _search_grid(
+        scorer,
+        pose,
+        translation_step=0.1,
+        translation_span=translation_span,
+        rotation_step=0.1,
+        rotation_span=rotation_span,
+    )
+
+
 def refine_pose_multiscale(
     scorer: PoseScorer,
     pose: Pose2D,
