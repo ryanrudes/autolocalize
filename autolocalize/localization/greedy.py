@@ -30,6 +30,7 @@ def greedy_localize(
     early_exit_score: float | None = None,
     try_heading_flip: bool = True,
     max_scan_corners_for_pairs: int = 12,
+    max_scan_corners_for_singles: int | None = None,
     top_k: int = 12,
     distance_tolerance: float | None = None,
     grid_resolution: float = 0.05,
@@ -97,7 +98,11 @@ def greedy_localize(
                         )
                         evaluate(pose, allow_early_exit=True)
 
-        for sc in ordered_scan:
+        single_scan = ordered_scan
+        if max_scan_corners_for_singles is not None:
+            single_scan = ordered_scan[: max(1, max_scan_corners_for_singles)]
+
+        for sc in single_scan:
             for mc in map_corners:
                 for pose in _poses_from_corner_pair(sc, mc, try_heading_flip):
                     evaluate(pose, allow_early_exit=False)

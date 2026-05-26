@@ -3,7 +3,6 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass
-
 import numpy as np
 
 from autolocalize.features.corners import CornerFeature
@@ -13,41 +12,15 @@ from autolocalize.geometry.pose import Pose2D
 from autolocalize.localization.fast_grid import FastOccupancyLookup, PoseScorer
 from autolocalize.localization.greedy import greedy_localize
 from autolocalize.localization.hypotheses import generate_grid_hypotheses
+from autolocalize.localization.adaptive import localize_adaptive
+from autolocalize.localization.config import (
+    InitialLocalizerConfig,
+    config_for_effort,
+)
 from autolocalize.localization.refine import refine_pose, refine_pose_multiscale
+from autolocalize.localization.selection import pick_best_candidate
 from autolocalize.map.grid import OccupancyGrid
 from autolocalize.sensors.lidar import LidarConfig, LidarScan
-
-
-@dataclass(frozen=True, slots=True)
-class InitialLocalizerConfig:
-    """Parameters for feature-based initial localization."""
-
-    min_match_score: float = 0.35
-    max_scan_corners: int = 12
-    corner_angle_min: float = math.radians(25)
-    min_corner_separation: float = 0.12
-    hit_tolerance: float = 0.08
-    refine_poses: bool = True
-    refine_top_k: int = 8
-    translation_span: float = 0.2
-    rotation_span: float = 0.35
-    try_heading_flip: bool = True
-    score_ray_stride: int = 6
-    final_score_ray_stride: int = 2
-    search_corner_weight: float = 0.15
-    max_scan_corners_for_pairs: int = 12
-    early_exit_score: float | None = None
-    freespace_consistency: bool = True
-    freespace_noise_margin: float | None = None
-    reject_robot_outside_free: bool = True
-    use_grid_search: bool = False
-    grid_search_on_failure: bool = True
-    grid_search_endpoint_threshold: float = 0.85
-    grid_xy_step: float = 0.2
-    grid_theta_step: float = math.pi / 8
-    max_grid_hypotheses: int = 5000
-    min_endpoint_for_corner_rank: float = 0.25
-    refine_multiscale: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,34 +33,11 @@ class LocalizationResult:
     map_corners: tuple[CornerFeature, ...]
     hypotheses_tested: int
     stopped_early: bool = False
+    effort_tier: int | None = None
 
     @property
     def success(self) -> bool:
         return self.pose is not None
-
-
-def _pick_best_candidate(
-    candidates: list[tuple[float, float, float, Pose2D]],
-    *,
-    min_match_score: float,
-    strong_endpoint: float = 0.92,
-) -> tuple[float, float, float, Pose2D]:
-    """
-    Choose a pose from refined candidates.
-
-    Prefer high endpoint match scores; among ties use lowest corner assignment cost.
-    """
-    ranked = sorted(candidates, key=lambda item: (-item[0], item[1]))
-    best_score, _, best_search_ep, best_pose = ranked[0]
-    strong = [item for item in ranked if item[2] >= strong_endpoint]
-    if len(strong) >= 2:
-        strong.sort(key=lambda item: (item[1], -item[0]))
-        best_score, _, best_search_ep, best_pose = strong[0]
-    elif best_score < min_match_score and len(ranked) > 1:
-        for score, cost, search_ep, pose in ranked[1:]:
-            if score >= min_match_score:
-                return score, cost, search_ep, pose
-    return best_score, 0.0, best_search_ep, best_pose
 
 
 class InitialLocalizer:
@@ -174,7 +124,10 @@ class InitialLocalizer:
             range_min=lidar_cfg.range_min,
             range_max=lidar_cfg.range_max,
         )
-        search_stride = max(1, cfg.score_ray_stride)
+        if cfg.effort == "adaptive":
+            search_stride = max(1, cfg.adaptive_quick_stride)
+        else:
+            search_stride = max(1, cfg.score_ray_stride)
         final_stride = max(1, cfg.final_score_ray_stride)
         search_xy = np.asarray(points[::search_stride], dtype=np.float64)
         final_xy = (
@@ -197,28 +150,6 @@ class InitialLocalizer:
             freespace_consistency=False,
             reject_robot_outside_free=False,
         )
-        final_scorer = (
-            PoseScorer(
-                self.lookup,
-                search_xy,
-                scan_corners,
-                map_corners,
-                hit_radius_cells=hit_cells,
-                freespace_consistency=cfg.freespace_consistency,
-                reject_robot_outside_free=cfg.reject_robot_outside_free,
-            )
-            if final_xy is search_xy
-            else PoseScorer(
-                self.lookup,
-                final_xy,
-                scan_corners,
-                map_corners,
-                hit_radius_cells=hit_cells,
-                freespace_consistency=cfg.freespace_consistency,
-                reject_robot_outside_free=cfg.reject_robot_outside_free,
-            )
-        )
-
         corner_w = cfg.search_corner_weight
         min_ep_for_corners = cfg.min_endpoint_for_corner_rank
 
@@ -229,6 +160,25 @@ class InitialLocalizer:
             if corner_w > 0.0 and scan_corners:
                 return endpoint + corner_w * search_scorer.score_corners(pose)
             return endpoint
+
+        if cfg.effort == "adaptive":
+            outcome = localize_adaptive(
+                self.grid,
+                scan_corners,
+                map_corners,
+                search_scorer,
+                cfg,
+                rank_pose,
+            )
+            return LocalizationResult(
+                pose=outcome.pose,
+                score=outcome.score,
+                scan_corners=scan_corners,
+                map_corners=map_corners,
+                hypotheses_tested=outcome.hypotheses_tested,
+                stopped_early=outcome.stopped_early,
+                effort_tier=outcome.effort_tier,
+            )
 
         greedy = greedy_localize(
             scan_corners,
@@ -294,7 +244,7 @@ class InitialLocalizer:
             refined_candidates.append((score, corner_cost, search_ep, pose))
 
         if refined_candidates:
-            best_score, _, best_search_ep, best_pose = _pick_best_candidate(
+            best_score, _, best_search_ep, best_pose = pick_best_candidate(
                 refined_candidates, min_match_score=cfg.min_match_score
             )
 
@@ -347,7 +297,7 @@ class InitialLocalizer:
                 refined_candidates.append((score, corner_cost, search_ep, pose))
 
             if refined_candidates:
-                best_score, _, best_search_ep, best_pose = _pick_best_candidate(
+                best_score, _, best_search_ep, best_pose = pick_best_candidate(
                     refined_candidates, min_match_score=cfg.min_match_score
                 )
 
