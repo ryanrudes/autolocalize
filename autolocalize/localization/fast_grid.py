@@ -40,6 +40,7 @@ class FastOccupancyLookup:
             grid, noise_cells=freespace_noise_cells
         )
         self._hit_masks: dict[int, np.ndarray] = {}
+        self._wall_index: dict[float, object] = {}
 
     def hit_mask(self, hit_radius_cells: int) -> np.ndarray:
         radius = max(0, hit_radius_cells)

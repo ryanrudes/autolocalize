@@ -5,6 +5,7 @@ Live Monte Carlo localization benchmark with a Rich progress UI.
     uv sync --dev
     uv run python scripts/live_benchmark.py -n 100
     uv run python scripts/live_benchmark.py -n 1000 --seed 42 --adaptive
+    uv run python scripts/live_benchmark.py -n 1000 --adaptive --icp
     uv run python scripts/live_benchmark.py -n 500 --fast
 """
 
@@ -15,7 +16,7 @@ import math
 import random
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -63,6 +64,7 @@ class RunStats:
     success: int = 0
     failed: int = 0
     skipped_no_corners: int = 0
+    icp_refined: int = 0
     localize_times_s: list[float] = field(default_factory=list)
     last_error: str = ""
     started_at: float = field(default_factory=time.perf_counter)
@@ -130,6 +132,8 @@ def build_stats_table(stats: RunStats, *, trans_tol: float, rot_tol: float) -> T
         ),
     )
     table.add_row("Skipped (no corners)", str(stats.skipped_no_corners))
+    if stats.icp_refined:
+        table.add_row("ICP refined", str(stats.icp_refined))
     table.add_row("Median localize", f"{stats.median_ms:.0f} ms")
     table.add_row("Elapsed", f"{stats.elapsed_s:.1f} s")
     table.add_row("Tolerance", f"{trans_tol:.2f} m trans, {math.degrees(rot_tol):.0f}° rot")
@@ -167,6 +171,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Adaptive tiered localizer (fast when confident, deep when not)",
     )
+    p.add_argument(
+        "--icp",
+        action="store_true",
+        help="Optional post-refinement: point-to-line ICP (sub-cm accuracy)",
+    )
     return p.parse_args()
 
 
@@ -191,6 +200,9 @@ def main() -> None:
         loc_cfg = config_for_effort("fast")
     else:
         loc_cfg = InitialLocalizerConfig(use_grid_search=False)
+
+    if args.icp:
+        loc_cfg = replace(loc_cfg, refine_icp=True, icp_ray_stride=1)
 
     sim = LidarSimulator(grid, lidar_cfg)
     localizer = InitialLocalizer(grid, loc_cfg)
@@ -245,6 +257,8 @@ def main() -> None:
                 stats.last_error = f"no pose (score {result.score:.3f})"
             else:
                 trans_err, rot_err = pose_error(result.pose, true_pose)
+                if result.icp_refined:
+                    stats.icp_refined += 1
                 if trans_err < args.trans_tol and rot_err < args.rot_tol:
                     stats.success += 1
                     stats.last_error = ""

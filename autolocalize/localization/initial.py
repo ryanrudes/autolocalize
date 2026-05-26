@@ -17,6 +17,7 @@ from autolocalize.localization.config import (
     InitialLocalizerConfig,
     config_for_effort,
 )
+from autolocalize.localization.icp_refine import refine_pose_icp
 from autolocalize.localization.refine import refine_pose, refine_pose_multiscale
 from autolocalize.localization.selection import pick_best_candidate
 from autolocalize.map.grid import OccupancyGrid
@@ -34,6 +35,8 @@ class LocalizationResult:
     hypotheses_tested: int
     stopped_early: bool = False
     effort_tier: int | None = None
+    icp_refined: bool = False
+    icp_mean_residual: float | None = None
 
     @property
     def success(self) -> bool:
@@ -90,6 +93,48 @@ class InitialLocalizer:
                 max_corners=None,
             )
         return self._map_corners
+
+    def _maybe_refine_icp(
+        self,
+        pose: Pose2D | None,
+        points: tuple[tuple[float, float], ...],
+        cfg: InitialLocalizerConfig,
+    ) -> tuple[Pose2D | None, bool, float | None]:
+        if pose is None or not cfg.refine_icp:
+            return pose, False, None
+
+        stride = max(1, cfg.icp_ray_stride)
+        local_xy = np.asarray(points[::stride], dtype=np.float64)
+        icp = refine_pose_icp(self.lookup, pose, local_xy, cfg)
+        return icp.pose, True, icp.mean_residual
+
+    def _finalize_result(
+        self,
+        *,
+        pose: Pose2D | None,
+        score: float,
+        scan_corners: tuple[CornerFeature, ...],
+        map_corners: tuple[CornerFeature, ...],
+        hypotheses_tested: int,
+        stopped_early: bool,
+        effort_tier: int | None,
+        points: tuple[tuple[float, float], ...],
+        cfg: InitialLocalizerConfig,
+    ) -> LocalizationResult:
+        refined_pose, icp_refined, icp_mean_residual = self._maybe_refine_icp(
+            pose, points, cfg
+        )
+        return LocalizationResult(
+            pose=refined_pose,
+            score=score,
+            scan_corners=scan_corners,
+            map_corners=map_corners,
+            hypotheses_tested=hypotheses_tested,
+            stopped_early=stopped_early,
+            effort_tier=effort_tier,
+            icp_refined=icp_refined,
+            icp_mean_residual=icp_mean_residual,
+        )
 
     def localize(
         self,
@@ -170,7 +215,7 @@ class InitialLocalizer:
                 cfg,
                 rank_pose,
             )
-            return LocalizationResult(
+            return self._finalize_result(
                 pose=outcome.pose,
                 score=outcome.score,
                 scan_corners=scan_corners,
@@ -178,6 +223,8 @@ class InitialLocalizer:
                 hypotheses_tested=outcome.hypotheses_tested,
                 stopped_early=outcome.stopped_early,
                 effort_tier=outcome.effort_tier,
+                points=points,
+                cfg=cfg,
             )
 
         greedy = greedy_localize(
@@ -311,11 +358,14 @@ class InitialLocalizer:
                 stopped_early=stopped_early,
             )
 
-        return LocalizationResult(
+        return self._finalize_result(
             pose=best_pose,
             score=best_score,
             scan_corners=scan_corners,
             map_corners=map_corners,
             hypotheses_tested=hypotheses_tested,
             stopped_early=stopped_early,
+            effort_tier=None,
+            points=points,
+            cfg=cfg,
         )

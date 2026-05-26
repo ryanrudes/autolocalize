@@ -111,6 +111,7 @@ flowchart LR
 4. **Score** hypotheses by occupancy hit rate (native C++ raster lookup).
 5. **Refine** the top candidates with a coarse-to-fine local search.
 6. **Fall back** to a coarse position/heading grid when endpoint match stays weak.
+7. **Optional ICP** — point-to-line scan-to-map matching for sub-centimeter pose polish (off by default).
 
 Symmetric environments (e.g. a plain box room) can remain ambiguous; use distinctive maps or tighten config for those cases.
 
@@ -133,6 +134,21 @@ localizer = InitialLocalizer(grid, config_for_effort("adaptive"))
 ```
 
 `LocalizationResult.effort_tier` reports which tier finished (`0` = quickest, `3` = full recovery). On 1000 maze poses (seed 42), adaptive is typically **~99%+ success** with **~5 ms median** (native C++ core) vs **~370 ms** for standard.
+
+### Optional ICP post-refinement
+
+For sub-centimeter accuracy after global localization, enable point-to-line ICP (Levenberg–Marquardt on scan endpoints vs. map wall segments):
+
+```python
+from dataclasses import replace
+from autolocalize.localization.config import config_for_effort
+
+cfg = replace(config_for_effort("adaptive"), refine_icp=True, icp_ray_stride=1)
+result = InitialLocalizer(grid, cfg).localize(scan, lidar_config=lidar)
+# result.icp_refined, result.icp_mean_residual
+```
+
+`refine_icp=False` by default — adaptive/standard behavior is unchanged unless you opt in. ICP expects a pose already within a few centimeters of the truth; it will not fix a wrong global alias.
 
 ## Maps
 

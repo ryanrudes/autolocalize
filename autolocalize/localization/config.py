@@ -35,6 +35,15 @@ class InitialLocalizerConfig:
     max_grid_hypotheses: int = 5000
     min_endpoint_for_corner_rank: float = 0.25
     refine_multiscale: bool = True
+    refine_icp: bool = False
+    icp_max_iterations: int = 20
+    icp_max_association_dist: float = 0.25
+    icp_convergence_translation: float = 1e-4
+    icp_convergence_rotation: float = 1e-4
+    icp_huber_delta: float = 0.05
+    icp_min_points: int = 20
+    icp_ray_stride: int = 1
+    icp_bucket_size: float = 0.5
     effort: Literal["standard", "fast", "adaptive"] = "standard"
     # Adaptive effort (refine-before-accept; no unrefined early exit)
     adaptive_quick_stride: int = 8

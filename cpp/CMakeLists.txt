@@ -15,6 +15,8 @@ pybind11_add_module(_native MODULE
   src/bindings.cpp
   src/pose_scorer.cpp
   src/refine.cpp
+  src/wall_segments.cpp
+  src/icp_refine.cpp
 )
 
 target_compile_options(_native PRIVATE -O3 -ffast-math)

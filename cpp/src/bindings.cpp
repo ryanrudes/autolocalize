@@ -9,6 +9,8 @@
 
 #include "pose_scorer.hpp"
 #include "refine.hpp"
+#include "wall_segments.hpp"
+#include "icp_refine.hpp"
 
 namespace py = pybind11;
 
@@ -176,6 +178,41 @@ class PoseScorerNative {
   std::optional<autolocalize::PoseScorerCore> core_;
 };
 
+class WallMapNative {
+ public:
+  WallMapNative(py::array_t<bool> occupied, double origin_x, double origin_y,
+                double resolution, double bucket_size)
+      : height_(static_cast<int>(occupied.shape(0))),
+        width_(static_cast<int>(occupied.shape(1))) {
+    if (occupied.ndim() != 2) {
+      throw std::invalid_argument("occupied must be 2D");
+    }
+    index_.emplace(flatten_bool_mask(occupied), width_, height_, origin_x,
+                   origin_y, resolution, bucket_size);
+  }
+
+  py::tuple refine_icp(py::array_t<double> local_xy, double x, double y,
+                       double theta, int max_iterations,
+                       double max_association_dist,
+                       double convergence_translation,
+                       double convergence_rotation, double huber_delta,
+                       int min_points) const {
+    const autolocalize::IcpRefineResult result = autolocalize::refine_icp(
+        *index_, flatten_xy2(local_xy), x, y, theta, max_iterations,
+        max_association_dist, convergence_translation, convergence_rotation,
+        huber_delta, min_points);
+    return py::make_tuple(result.x, result.y, result.theta, result.mean_residual,
+                          result.iterations, result.converged);
+  }
+
+  int num_segments() const { return static_cast<int>(index_->segments().size()); }
+
+ private:
+  int height_;
+  int width_;
+  std::optional<autolocalize::WallSegmentIndex> index_;
+};
+
 }  // namespace
 
 PYBIND11_MODULE(_native, m) {
@@ -225,4 +262,16 @@ PYBIND11_MODULE(_native, m) {
       .def("refine_multiscale", &PoseScorerNative::refine_multiscale, py::arg("x"),
            py::arg("y"), py::arg("theta"), py::arg("translation_span"),
            py::arg("rotation_span"));
+
+  py::class_<WallMapNative>(m, "WallMapNative")
+      .def(py::init<py::array_t<bool>, double, double, double, double>(),
+           py::arg("occupied"), py::arg("origin_x"), py::arg("origin_y"),
+           py::arg("resolution"), py::arg("bucket_size") = 0.5)
+      .def("refine_icp", &WallMapNative::refine_icp, py::arg("local_xy"),
+           py::arg("x"), py::arg("y"), py::arg("theta"),
+           py::arg("max_iterations") = 20, py::arg("max_association_dist") = 0.25,
+           py::arg("convergence_translation") = 1e-4,
+           py::arg("convergence_rotation") = 1e-4, py::arg("huber_delta") = 0.05,
+           py::arg("min_points") = 20)
+      .def_property_readonly("num_segments", &WallMapNative::num_segments);
 }
